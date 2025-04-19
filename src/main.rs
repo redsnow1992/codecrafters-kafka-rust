@@ -1,14 +1,14 @@
-// #![allow(unused_imports)]
-// use std::net::TcpListener;
+use bytes::{BufMut, BytesMut};
+use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-
-struct Header {
-    correlation_id: i32
+struct ResponseHeader {
+    correlation_id: i32,
 }
 
 struct Response {
     message_size: i32,
-    header: Header,
+    header: ResponseHeader,
 }
 
 impl Response {
@@ -20,25 +20,39 @@ impl Response {
     }
 }
 
-// fn main() {
-//     let listener = TcpListener::bind("127.0.0.1:9092").unwrap();
-    
-//     for stream in listener.incoming() {
-//         match stream {
-//             Ok(_stream) => {
-//                 println!("accepted new connection");
-                
-//             }
-//             Err(e) => {
-//                 println!("error: {}", e);
-//             }
-//         }
-//     }
-// }
+struct RequestHeader {
+    request_api_key: i16,
+    request_api_version: i16,
+    correlation_id: i32,
+    client_id: Option<String>,
+}
 
-use bytes::{BufMut, BytesMut};
-use tokio::net::TcpListener;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+struct Request {
+    message_size: i32,
+    header: RequestHeader,
+}
+
+impl Request {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let buf = bytes;
+        let message_size = i32::from_be_bytes(buf[0..4].try_into().unwrap());
+        let request_api_key = i16::from_be_bytes(buf[4..6].try_into().unwrap());
+        let request_api_version = i16::from_be_bytes(buf[6..8].try_into().unwrap());
+        let correlation_id = i32::from_be_bytes(buf[8..12].try_into().unwrap());
+        let client_id = None; // Placeholder for client_id parsing
+
+        Request {
+            message_size,
+            header: RequestHeader {
+                request_api_key,
+                request_api_version,
+                correlation_id,
+                client_id,
+            },
+        }
+    }
+    
+}
 
 #[tokio::main]
 async fn main() {
@@ -53,9 +67,10 @@ async fn main() {
                     match socket.read(&mut buffer).await {
                         Ok(n) if n > 0 => {
                             // println!("Received: {:?}", &buffer[..n]);
+                            let request = Request::from_bytes(&buffer[..n]);
                             let response = Response {
                                 message_size: 0 as i32,
-                                header: Header { correlation_id: 7 },
+                                header: ResponseHeader { correlation_id: request.header.correlation_id },
                             };
                             if let Err(e) = socket.write_all(&response.to_bytes()).await {
                                 println!("Failed to write to socket: {}", e);
