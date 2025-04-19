@@ -1,4 +1,5 @@
 use bytes::{BufMut, BytesMut};
+use codecrafters_kafka::api_key::ApiKey;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -6,16 +7,40 @@ struct ResponseHeader {
     correlation_id: i32,
 }
 
+struct ResponseBody {
+    error_code: i16,
+}
+
+impl ResponseBody {
+    fn to_bytes(&self) -> BytesMut {
+        let mut buf = BytesMut::with_capacity(2); // Allocate enough space for the struct
+        buf.put_i16(self.error_code);             // Serialize error_code
+        buf
+    }
+}
+
+impl ResponseHeader {
+    fn to_bytes(&self) -> BytesMut {
+        let mut buf = BytesMut::with_capacity(4); // Allocate enough space for the struct
+        buf.put_i32(self.correlation_id);          // Serialize correlation_id
+        buf
+    }
+}
+
 struct Response {
     message_size: i32,
     header: ResponseHeader,
+    body: ResponseBody
 }
+
 
 impl Response {
     fn to_bytes(&self) -> BytesMut {
-        let mut buf = BytesMut::with_capacity(8); // Allocate enough space for the struct
+        let mut buf = BytesMut::with_capacity(10); // Allocate enough space for the struct
         buf.put_i32(self.message_size);          // Serialize message_size
-        buf.put_i32(self.header.correlation_id); // Serialize correlation_id
+        buf.put_slice(&self.header.to_bytes()[..]); // Serialize header
+        buf.put_slice(&self.body.to_bytes()[..]); // Serialize body
+        
         buf
     }
 }
@@ -68,10 +93,7 @@ async fn main() {
                         Ok(n) if n > 0 => {
                             // println!("Received: {:?}", &buffer[..n]);
                             let request = Request::from_bytes(&buffer[..n]);
-                            let response = Response {
-                                message_size: 0 as i32,
-                                header: ResponseHeader { correlation_id: request.header.correlation_id },
-                            };
+                            let response = handle(request).await;
                             if let Err(e) = socket.write_all(&response.to_bytes()).await {
                                 println!("Failed to write to socket: {}", e);
                             }
@@ -85,5 +107,36 @@ async fn main() {
                 println!("Error accepting connection: {}", e);
             }
         }
+    }
+}
+
+
+async fn handle(request: Request) -> Response {
+    let request_body = match ApiKey::try_from(request.header.request_api_key).unwrap() {
+        ApiKey::Produce => {
+            ResponseBody {
+                error_code: 0, // No error
+            }
+        },
+        ApiKey::Fetch => {
+            ResponseBody {
+                error_code: 0, // No error
+            }
+        },
+        ApiKey::ListOffsets => {
+            ResponseBody {
+                error_code: 0, // No error
+            }
+        },
+        ApiKey::ApiVersions => {
+            ResponseBody {
+                error_code: 35, // No error
+            }
+        },
+    };
+    Response {
+        message_size: 0 as i32,
+        header: ResponseHeader { correlation_id: request.header.correlation_id },
+        body: request_body,
     }
 }
