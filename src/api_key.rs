@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-#[derive(IntoPrimitive, TryFromPrimitive, Debug, PartialEq)]
+#[derive(IntoPrimitive, TryFromPrimitive, Debug, PartialEq, Clone)]
 #[repr(i16)]
 pub enum ApiKey {
     Produce = 0,
