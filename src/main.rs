@@ -1,7 +1,9 @@
 use core::convert::Into;
 
 use bytes::{BufMut, BytesMut};
-use codecrafters_kafka::api_key::ApiKey;
+use codecrafters_kafka::api_key::{ApiKey, ApiKeyInfo};
+use codecrafters_kafka::error::ErrorCode;
+use codecrafters_kafka::{ApiVersionsBody, ResponseBody};
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -9,56 +11,31 @@ struct ResponseHeader {
     correlation_id: i32,
 }
 
-struct ResponseBody {
-    error_code: i16,
-    api_key: ApiKey,
-    min_version: i16,
-    max_version: i16,
-}
 
-impl ResponseBody {
-    fn to_bytes(&self) -> BytesMut {
-        let mut buf = BytesMut::with_capacity(2); // Allocate enough space for the struct
-        buf.put_i16(self.error_code);             // Serialize error_code
-        buf.put_i16(self.api_key.clone().into());       // Serialize api_key
-        buf.put_i16(self.min_version);
-        buf.put_i16(self.max_version);
-        buf
-    }
-
-    fn size(&self) -> i32 {
-        2 + 2 + 2 + 2 // Size of error_code + api_key + min_version + max_version
-    }
-}
-
-impl ResponseHeader {
-    fn to_bytes(&self) -> BytesMut {
+impl From<ResponseHeader> for BytesMut {
+    fn from(header: ResponseHeader) -> Self {
         let mut buf = BytesMut::with_capacity(4); // Allocate enough space for the struct
-        buf.put_i32(self.correlation_id);          // Serialize correlation_id
+        buf.put_i32(header.correlation_id);       // Serialize correlation_id
         buf
-    }
-    
-    fn size(&self) -> i32 {
-        4 // Size of correlation_id
     }
 }
 
 struct Response {
-    message_size: i32,
     header: ResponseHeader,
-    body: ResponseBody
+    body: Box<dyn ResponseBody>,
 }
 
-impl Response {
-    fn to_bytes(&mut self) -> BytesMut {
-        let mut buf = BytesMut::with_capacity((self.message_size + 4).try_into().unwrap()); // Allocate enough space for the struct
-        buf.put_i32(self.message_size); // Placeholder for message_size
-        buf.put_slice(&self.header.to_bytes()[..]); // Serialize header
-        buf.put_slice(&self.body.to_bytes()[..]); // Serialize body
-        // self.message_size = (buf.len() - 4) as i32; // Update message_size
-        // buf[0..4].copy_from_slice(&self.message_size.to_be_bytes()); // Update message_size in the buffer
-        // buf.put_i32(self.message_size); // Serialize message_size
-        
+impl From<Response> for BytesMut {
+    fn from(response: Response) -> Self {
+        let header_bytes: BytesMut = response.header.into();
+        let body_bytes: BytesMut = response.body.to_bytes();
+        let message_size = header_bytes.len() + body_bytes.len();
+        // println!("Message size: {}", message_size);
+        let mut buf = BytesMut::with_capacity(message_size + 4); // Allocate enough space for the struct
+        buf.put_i32(message_size as i32); // Placeholder for message_size
+        buf.extend_from_slice(&header_bytes);
+        buf.extend_from_slice(&body_bytes);
+
         buf
     }
 }
@@ -100,7 +77,6 @@ impl Request {
 #[tokio::main]
 async fn main() {
     let listener = TcpListener::bind("127.0.0.1:9092").await.unwrap();
-
     loop {
         match listener.accept().await {
             Ok((mut socket, _addr)) => {
@@ -111,8 +87,10 @@ async fn main() {
                         Ok(n) if n > 0 => {
                             // println!("Received: {:?}", &buffer[..n]);
                             let request = Request::from_bytes(&buffer[..n]);
-                            let mut response = handle(request).await;
-                            if let Err(e) = socket.write_all(&response.to_bytes()).await {
+                            let response = handle(request).await;
+                            let response_bytes: BytesMut = response.into();
+                            println!("Response: {:?}", &response_bytes);
+                            if let Err(e) = socket.write_all(&response_bytes).await {
                                 println!("Failed to write to socket: {}", e);
                             }
                         }
@@ -128,49 +106,34 @@ async fn main() {
     }
 }
 
-
 async fn handle(request: Request) -> Response {
-    let request_body = match ApiKey::try_from(request.header.request_api_key).unwrap() {
-        ApiKey::Produce => {
-            ResponseBody {
-                error_code: 0, // No error
-                api_key: ApiKey::Produce,
-                min_version: 0,
-                max_version: 0,
-            }
-        },
-        ApiKey::Fetch => {
-            ResponseBody {
-                error_code: 0, // No error
-                api_key: ApiKey::Fetch,
-                min_version: 0,
-                max_version: 0,
-            }
-        },
-        ApiKey::ListOffsets => {
-            ResponseBody {
-                error_code: 0, // No error
-                api_key: ApiKey::ListOffsets,
-                min_version: 0,
-                max_version: 0,
-            }
-        },
+    let body: Box<dyn ResponseBody> = match ApiKey::try_from(request.header.request_api_key).unwrap() {
         ApiKey::ApiVersions => {
-            ResponseBody {
-                error_code: 35, // No error
-                api_key: ApiKey::ApiVersions,
-                min_version: 0,
-                max_version: 4,
+            if request.header.request_api_version < 0 || request.header.request_api_version > 4 {
+                Box::new(ApiVersionsBody {
+                    error_code: ErrorCode::UnsupportedVersion, // Error code for invalid version
+                    api_keys: vec![],
+                })
+            } else {
+                Box::new(ApiVersionsBody {
+                    error_code: ErrorCode::NONE, // No error
+                    api_keys: vec![
+                        ApiKeyInfo {
+                            api_key: ApiKey::ApiVersions,
+                            min_version: 0,
+                            max_version: 4,
+                        },
+                    ],
+                })
             }
         },
     };
     let header = ResponseHeader {
         correlation_id: request.header.correlation_id,
     };
-
     Response {
-        message_size: header.size() + request_body.size(),
-        header: header,
-        body: request_body,
+        // message_size: header.size() + response_body.size(),
+        header,
+        body,
     }
 }
