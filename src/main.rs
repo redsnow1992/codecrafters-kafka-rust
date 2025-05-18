@@ -1,78 +1,13 @@
-use core::convert::Into;
+use bytes::{Buf, BufMut, BytesMut};
+use kafka_protocol::messages::api_versions_request::ApiVersionsRequest;
+use kafka_protocol::messages::api_versions_response::{ApiVersion, ApiVersionsResponse};
+use kafka_protocol::messages::{ApiKey, RequestHeader, RequestKind};
+use kafka_protocol::error::ResponseError;
 
-use bytes::{BufMut, BytesMut};
-use codecrafters_kafka::api_key::{ApiKey, ApiKeyInfo};
-use codecrafters_kafka::error::ErrorCode;
-use codecrafters_kafka::{ApiVersionsBody, ResponseBody};
+use kafka_protocol::protocol::buf::ByteBuf;
+use kafka_protocol::protocol::{Decodable, Encodable};
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-struct ResponseHeader {
-    correlation_id: i32,
-}
-
-
-impl From<ResponseHeader> for BytesMut {
-    fn from(header: ResponseHeader) -> Self {
-        let mut buf = BytesMut::with_capacity(4); // Allocate enough space for the struct
-        buf.put_i32(header.correlation_id);       // Serialize correlation_id
-        buf
-    }
-}
-
-struct Response {
-    header: ResponseHeader,
-    body: Box<dyn ResponseBody>,
-}
-
-impl From<Response> for BytesMut {
-    fn from(response: Response) -> Self {
-        let header_bytes: BytesMut = response.header.into();
-        let body_bytes: BytesMut = response.body.to_bytes();
-        let message_size = header_bytes.len() + body_bytes.len();
-        // println!("Message size: {}", message_size);
-        let mut buf = BytesMut::with_capacity(message_size + 4); // Allocate enough space for the struct
-        buf.put_i32(message_size as i32); // Placeholder for message_size
-        buf.extend_from_slice(&header_bytes);
-        buf.extend_from_slice(&body_bytes);
-
-        buf
-    }
-}
-
-struct RequestHeader {
-    request_api_key: i16,
-    request_api_version: i16,
-    correlation_id: i32,
-    client_id: Option<String>,
-}
-
-struct Request {
-    message_size: i32,
-    header: RequestHeader,
-}
-
-impl Request {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let buf = bytes;
-        let message_size = i32::from_be_bytes(buf[0..4].try_into().unwrap());
-        let request_api_key = i16::from_be_bytes(buf[4..6].try_into().unwrap());
-        let request_api_version = i16::from_be_bytes(buf[6..8].try_into().unwrap());
-        let correlation_id = i32::from_be_bytes(buf[8..12].try_into().unwrap());
-        let client_id = None; // Placeholder for client_id parsing
-
-        Request {
-            message_size,
-            header: RequestHeader {
-                request_api_key,
-                request_api_version,
-                correlation_id,
-                client_id,
-            },
-        }
-    }
-    
-}
 
 #[tokio::main]
 async fn main() {
@@ -85,11 +20,9 @@ async fn main() {
                     let mut buffer = [0; 1024];
                     match socket.read(&mut buffer).await {
                         Ok(n) if n > 0 => {
-                            // println!("Received: {:?}", &buffer[..n]);
-                            let request = Request::from_bytes(&buffer[..n]);
-                            let response = handle(request).await;
+                            let mut buf = BytesMut::from(&buffer[4..n]);
+                            let response = handle(&mut buf).await;
                             let response_bytes: BytesMut = response.into();
-                            println!("Response: {:?}", &response_bytes);
                             if let Err(e) = socket.write_all(&response_bytes).await {
                                 println!("Failed to write to socket: {}", e);
                             }
@@ -106,34 +39,54 @@ async fn main() {
     }
 }
 
-async fn handle(request: Request) -> Response {
-    let body: Box<dyn ResponseBody> = match ApiKey::try_from(request.header.request_api_key).unwrap() {
-        ApiKey::ApiVersions => {
-            if request.header.request_api_version < 0 || request.header.request_api_version > 4 {
-                Box::new(ApiVersionsBody {
-                    error_code: ErrorCode::UnsupportedVersion, // Error code for invalid version
-                    api_keys: vec![],
-                })
-            } else {
-                Box::new(ApiVersionsBody {
-                    error_code: ErrorCode::NONE, // No error
-                    api_keys: vec![
-                        ApiKeyInfo {
-                            api_key: ApiKey::ApiVersions,
-                            min_version: 0,
-                            max_version: 4,
-                        },
-                    ],
-                })
-            }
-        },
+fn check_version(api_key: ApiKey, api_version: i16) -> bool {
+    let api_version_range = api_key.valid_versions();
+    api_version_range.min <= api_version && api_version_range.max >= api_version
+}
+
+async fn handle(buf: &mut BytesMut) -> BytesMut {
+    let api_key = buf.peek_bytes(0..2).get_i16();
+    let api_version = buf.peek_bytes(2..4).get_i16();
+    let header_version = ApiKey::try_from(api_key).unwrap().request_header_version(api_version);
+    
+    let header = RequestHeader::decode(buf, header_version).unwrap();
+    let api_key = ApiKey::try_from(api_key).unwrap();
+
+    if !check_version(api_key, api_version) {
+        let mut res_buf = BytesMut::with_capacity(10);
+            res_buf.put_i32(4);
+            res_buf.put_i32(header.correlation_id);
+            res_buf.put_i16(ResponseError::UnsupportedVersion.code());
+        return res_buf;
+    }
+
+    let req = match api_key {
+        ApiKey::ApiVersions => RequestKind::ApiVersions(ApiVersionsRequest::decode(buf, header.request_api_version).unwrap()),
+        _ => panic!("Unsupported API key: {:?}", api_key),
     };
-    let header = ResponseHeader {
-        correlation_id: request.header.correlation_id,
-    };
-    Response {
-        // message_size: header.size() + response_body.size(),
-        header,
-        body,
+    let mut body_buf = BytesMut::new();
+    match req {
+        RequestKind::ApiVersions(_req) => {
+            let response = ApiVersionsResponse::default()
+                .with_api_keys(vec![
+                    ApiVersion::default()
+                        .with_api_key(ApiKey::ApiVersions as i16)
+                        .with_min_version(0)
+                        .with_max_version(4),
+                    ApiVersion::default()
+                        .with_api_key(ApiKey::DescribeTopicPartitions as i16)
+                        .with_min_version(0)
+                        .with_max_version(4),
+                ]);
+            response.encode(&mut body_buf, api_version).unwrap();
+            
+            let mut res_buf = BytesMut::with_capacity(8);
+            res_buf.put_i32(response.compute_size(api_version).unwrap() as i32 + 4);
+            res_buf.put_i32(header.correlation_id);
+            
+            res_buf.extend_from_slice(&body_buf[..]);
+            res_buf
+        }
+        _ => panic!()
     }
 }
