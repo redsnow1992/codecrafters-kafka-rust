@@ -82,6 +82,7 @@ dependencies = [
  "kafka-protocol",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
