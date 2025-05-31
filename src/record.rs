@@ -1,4 +1,6 @@
-use kafka_protocol::{protocol::buf::ByteBuf, records::Record};
+use std::collections::HashMap;
+
+use kafka_protocol::{protocol::buf::ByteBuf, records::{Record, RecordSet}};
 use uuid::Uuid;
 
 pub fn to_i8(byte: u8) -> i8 {
@@ -93,7 +95,6 @@ pub fn parse_record_value<B: ByteBuf>(buf: &mut B) -> RecordValue {
     buf.get_i8(); // frame version
     let value_type = buf.get_i8(); // type
     buf.get_i8(); // version
-    println!("vt: {value_type}");
     match value_type {
         0x0c => {
             let name = parse_string_by_length(buf);
@@ -116,7 +117,35 @@ pub fn parse_record_value<B: ByteBuf>(buf: &mut B) -> RecordValue {
     }
 }
 
-
+// record_set to topic_id -> vec[partition_id]
+pub fn record_set_to_topic(record_sets: Vec<RecordSet>) -> HashMap<String, (Uuid, Vec<i32>)> {
+    let mut ret = HashMap::new();
+    for record_set in record_sets.iter() {
+        if record_set.records.len() > 1 {
+            let record_value = extract_record_value(&record_set.records[0]);
+            let (name, topic_id) = match record_value {
+                RecordValue::TopicRecord(tr) => {
+                    (tr.name, tr.topic_id)
+                }
+                _ => continue
+            };
+            let partition_ids = record_set.records[1..]
+                .iter()
+                .flat_map(|r| {
+                    let record_value = extract_record_value(r);
+                    match record_value {
+                        RecordValue::PartitionRecord(pr) => {
+                            Some(pr.partition_id)
+                        }
+                        _ => None
+                    }
+                })
+                .collect();
+            ret.insert(name, (topic_id, partition_ids));
+        }
+    }
+    ret
+}
 
 #[cfg(test)]
 mod tests {
@@ -183,7 +212,6 @@ mod tests {
             } else {
                 panic!("error parse record value");
             }
-            // println!("{}, {:?}", rb2.records.len(), rb2.records[0]);
         } else {
             panic!("error parse record batch");
         }
@@ -204,18 +232,6 @@ mod tests {
                     println!("{:?}", record_value);
                 }
             }
-            // println!("{:?}", record_batch);
-            // let rb1 = &record_batch[0];
-            // let record = &rb1.records[0];
-            // let mut record_value = record.value.clone();
-
-            // if let Some(ref mut value) = &mut record_value {
-            //     let record_value = parse_record_value(value);
-            //     match record_value {
-            //         RecordValue::FeatureLevelRecord(flr) => assert_eq!("metadata.version", flr.name),
-            //         _ => panic!("unreachable"),
-            //     }
-            // }
         }
     }
 }
