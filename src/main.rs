@@ -1,16 +1,19 @@
 
 use bytes::{Buf, BufMut, BytesMut};
+use codecrafters_kafka::record::{extract_record_value, RecordValue};
 use kafka_protocol::messages::api_versions_request::ApiVersionsRequest;
 use kafka_protocol::messages::api_versions_response::{ApiVersion, ApiVersionsResponse};
-use kafka_protocol::messages::describe_topic_partitions_response::DescribeTopicPartitionsResponseTopic;
+use kafka_protocol::messages::describe_topic_partitions_response::{DescribeTopicPartitionsResponsePartition, DescribeTopicPartitionsResponseTopic};
 use kafka_protocol::messages::{ApiKey, DescribeTopicPartitionsRequest, DescribeTopicPartitionsResponse, RequestHeader, RequestKind, ResponseHeader, ResponseKind};
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::protocol::buf::ByteBuf;
 use kafka_protocol::protocol::{Decodable, Encodable, HeaderVersion};
-use uuid::Uuid;
+use kafka_protocol::records::{RecordBatchDecoder, RecordSet};
+use tokio::fs;
 
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use uuid::Uuid;
 
 
 #[tokio::main]
@@ -114,15 +117,82 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
         }
         RequestKind::DescribeTopicPartitions(_req) => {
             let topic_request = &_req.topics[0];
+            let record_sets = parse_cluster_metadata().await;
+            
             let topic_response = DescribeTopicPartitionsResponseTopic::default()
                 .with_name(Some(topic_request.name.clone()))
                 .with_error_code(ResponseError::UnknownTopicOrPartition.code())
                 .with_topic_id(Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap());
-            let resp = DescribeTopicPartitionsResponse::default()
+            let mut resp = DescribeTopicPartitionsResponse::default()
                 .with_topics(vec![topic_response]);
+
+            for record_set in record_sets.iter() {
+                if record_set.records.len() > 1 {
+                    let record_value = extract_record_value(&record_set.records[0]);
+                    let topic_id = match record_value {
+                        RecordValue::TopicRecord(tr) => {
+                            if tr.name != topic_request.name.0.as_str() {
+                                continue;
+                            } else {
+                                tr.topic_id
+                            }
+                        }
+                        _ => continue
+                    };
+                    let partitions = record_set.records[1..]
+                        .iter()
+                        .flat_map(|r| {
+                            let record_value = extract_record_value(r);
+                            match record_value {
+                                RecordValue::PartitionRecord(pr) => {
+                                    let partition = DescribeTopicPartitionsResponsePartition::default()
+                                        .with_partition_index(pr.partition_id);
+                                    Some(partition)
+                                }
+                                _ => None
+                            }
+                        })
+                        .collect();
+
+                    let topic_response = DescribeTopicPartitionsResponseTopic::default()
+                        .with_name(Some(topic_request.name.clone()))
+                        .with_topic_id(topic_id)
+                        .with_partitions(partitions);
+                        // .with_error_code(ResponseError::UnknownTopicOrPartition.code())
+                        // .with_topic_id(Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap());
+                    resp = DescribeTopicPartitionsResponse::default()
+                        .with_topics(vec![topic_response]);
+                }
+            }
             (ResponseKind::DescribeTopicPartitions(resp), DescribeTopicPartitionsResponse::header_version(api_version))
+
+            
+            // let record = &record_sets[0].records[0];
+            // let mut record_value = record.value.clone().unwrap();
+            // let topic_record = TopicRecord::decode(&mut record_value);
+            // let partition = DescribeTopicPartitionsResponsePartition::default()
+            //     .with_partition_index(record.sequence);
+
+            // let topic_response = DescribeTopicPartitionsResponseTopic::default()
+            //     .with_name(Some(topic_request.name.clone()))
+            //     .with_topic_id(topic_record.topic_id)
+            //     .with_partitions(partitions);
+            //     // .with_error_code(ResponseError::UnknownTopicOrPartition.code())
+            //     // .with_topic_id(Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap());
+            // let resp = DescribeTopicPartitionsResponse::default()
+            //     .with_topics(vec![topic_response]);
+            // (ResponseKind::DescribeTopicPartitions(resp), DescribeTopicPartitionsResponse::header_version(api_version))
         }
         _ => panic!()
     };
     build_response(default_response_header(request_header.correlation_id), header_version, response, api_version)
+}
+
+async fn parse_cluster_metadata() -> Vec<RecordSet> {
+    let filename = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
+    let bytes = fs::read(filename).await.unwrap();
+    println!("file data: {:02x?}", bytes);
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&bytes);
+    RecordBatchDecoder::decode_all(&mut buf).unwrap()
 }
