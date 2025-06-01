@@ -4,7 +4,7 @@ use codecrafters_kafka::record::record_set_to_topic;
 use kafka_protocol::messages::api_versions_request::ApiVersionsRequest;
 use kafka_protocol::messages::api_versions_response::{ApiVersion, ApiVersionsResponse};
 use kafka_protocol::messages::describe_topic_partitions_response::{DescribeTopicPartitionsResponsePartition, DescribeTopicPartitionsResponseTopic};
-use kafka_protocol::messages::{ApiKey, DescribeTopicPartitionsRequest, DescribeTopicPartitionsResponse, RequestHeader, RequestKind, ResponseHeader, ResponseKind};
+use kafka_protocol::messages::{ApiKey, DescribeTopicPartitionsRequest, DescribeTopicPartitionsResponse, FetchRequest, FetchResponse, RequestHeader, RequestKind, ResponseHeader, ResponseKind};
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::protocol::buf::ByteBuf;
 use kafka_protocol::protocol::{Decodable, Encodable, HeaderVersion};
@@ -98,6 +98,7 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
     let req = match api_key {
         ApiKey::ApiVersions => RequestKind::ApiVersions(ApiVersionsRequest::decode(buf, request_header.request_api_version).unwrap()),
         ApiKey::DescribeTopicPartitions => RequestKind::DescribeTopicPartitions(DescribeTopicPartitionsRequest::decode(buf, request_header.request_api_version).unwrap()),
+        ApiKey::Fetch => RequestKind::Fetch(FetchRequest::decode(buf, request_header.request_api_version).unwrap()),
         _ => panic!("Unsupported API key: {:?}", api_key),
     };
     let (response, header_version) = match req {
@@ -151,6 +152,10 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
                 .with_topics(topics);
             
             (ResponseKind::DescribeTopicPartitions(resp), DescribeTopicPartitionsResponse::header_version(api_version))
+        }
+        RequestKind::Fetch(_req) => {
+            let resp = FetchResponse::default();
+            (ResponseKind::Fetch(resp), FetchResponse::header_version(api_version))
         }
         _ => panic!()
     };
