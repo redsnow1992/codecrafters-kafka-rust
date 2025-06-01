@@ -112,6 +112,10 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
                         .with_api_key(ApiKey::DescribeTopicPartitions as i16)
                         .with_min_version(0)
                         .with_max_version(4),
+                    ApiVersion::default()
+                        .with_api_key(ApiKey::Fetch as i16)
+                        .with_min_version(0)
+                        .with_max_version(16),
                 ]);
             (ResponseKind::ApiVersions(resp), ApiVersionsResponse::header_version(api_version))
         }

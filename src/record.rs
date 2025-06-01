@@ -18,28 +18,6 @@ pub fn to_i16(bytes: &[u8]) -> i16 {
     u8::from_be(bytes[0] >> 1) as i16
 }
 
-// impl Record {
-//     pub fn from_bytes(bytes: &[u8]) -> Self {
-//         let key_length = to_i8(bytes[6]);
-//         let key = if key_length == -1 { None } else { Some(bytes[7..(7+(key_length as usize))].to_vec()) };
-//         let value_length_idx = if key_length == -1 { 7 } else { 7+key_length };
-//         let value_length = to_i8(bytes[value_length_idx as usize]);
-//         let value = if value_length == -1 { None } else { Some(bytes[(value_length_idx as usize)..(value_length_idx+value_length) as usize].to_vec()) };
-//         let headers_array_cnt_idx = if value_length == -1 { value_length_idx + 1 } else { value_length_idx+value_length };
-//         Self {
-//             length: to_i16(&bytes[0..2]),
-//             attributes: to_i8(bytes[2]),
-//             timestamp_delta: to_i8(bytes[3]),
-//             offset_delta: to_i8(bytes[4]),
-//             key_length,
-//             key,
-//             value_length,
-//             value,
-//             headers_array_cnt: to_i8(bytes[headers_array_cnt_idx as usize]),
-//         }
-//     }
-// }
-
 // type: 
 // 02: TopicRecord
 // 03: PartitionRecord
