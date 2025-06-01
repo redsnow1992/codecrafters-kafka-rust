@@ -4,6 +4,7 @@ use codecrafters_kafka::record::record_set_to_topic;
 use kafka_protocol::messages::api_versions_request::ApiVersionsRequest;
 use kafka_protocol::messages::api_versions_response::{ApiVersion, ApiVersionsResponse};
 use kafka_protocol::messages::describe_topic_partitions_response::{DescribeTopicPartitionsResponsePartition, DescribeTopicPartitionsResponseTopic};
+use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
 use kafka_protocol::messages::{ApiKey, DescribeTopicPartitionsRequest, DescribeTopicPartitionsResponse, FetchRequest, FetchResponse, RequestHeader, RequestKind, ResponseHeader, ResponseKind};
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::protocol::buf::ByteBuf;
@@ -154,7 +155,22 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
             (ResponseKind::DescribeTopicPartitions(resp), DescribeTopicPartitionsResponse::header_version(api_version))
         }
         RequestKind::Fetch(_req) => {
-            let resp = FetchResponse::default();
+            let resp = if _req.topics.is_empty() {
+                FetchResponse::default()
+            } else {
+                let topic = &_req.topics[0];
+                let topic_id = topic.topic_id;
+
+                let partition = PartitionData::default()
+                    .with_partition_index(0)
+                    .with_error_code(ResponseError::UnknownTopicId.code());
+                let resp = FetchableTopicResponse::default()
+                    .with_topic_id(topic_id)
+                    .with_partitions(vec![partition]);
+                FetchResponse::default()
+                    .with_responses(vec![resp])
+            };
+
             (ResponseKind::Fetch(resp), FetchResponse::header_version(api_version))
         }
         _ => panic!()
