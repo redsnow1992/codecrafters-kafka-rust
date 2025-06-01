@@ -155,15 +155,24 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
             (ResponseKind::DescribeTopicPartitions(resp), DescribeTopicPartitionsResponse::header_version(api_version))
         }
         RequestKind::Fetch(_req) => {
+            let record_sets = parse_cluster_metadata().await;
+            let topic_to_partition_ids = record_set_to_topic(record_sets);
+            println!("{:?}", topic_to_partition_ids);
+
             let resp = if _req.topics.is_empty() {
                 FetchResponse::default()
             } else {
                 let topic = &_req.topics[0];
                 let topic_id = topic.topic_id;
+                let mut error_code = ResponseError::UnknownTopicId.code();
+                println!("{:?}", topic.topic);
+                if topic_to_partition_ids.values().any(|tuple| tuple.0.eq(&topic_id)) {
+                    error_code = 0;
+                };
 
                 let partition = PartitionData::default()
                     .with_partition_index(0)
-                    .with_error_code(ResponseError::UnknownTopicId.code());
+                    .with_error_code(error_code);
                 let resp = FetchableTopicResponse::default()
                     .with_topic_id(topic_id)
                     .with_partitions(vec![partition]);
