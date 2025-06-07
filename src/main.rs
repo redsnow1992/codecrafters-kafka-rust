@@ -1,6 +1,9 @@
 
+use std::collections::HashMap;
+
 use bytes::{Buf, BufMut, BytesMut};
 use codecrafters_kafka::record::record_set_to_topic;
+use futures::future::join_all;
 use kafka_protocol::messages::api_versions_request::ApiVersionsRequest;
 use kafka_protocol::messages::api_versions_response::{ApiVersion, ApiVersionsResponse};
 use kafka_protocol::messages::describe_topic_partitions_response::{DescribeTopicPartitionsResponsePartition, DescribeTopicPartitionsResponseTopic};
@@ -123,7 +126,7 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
         }
         RequestKind::DescribeTopicPartitions(_req) => {
             let record_sets = parse_cluster_metadata().await;
-            let topic_to_partition_ids = record_set_to_topic(record_sets);
+            let topic_to_partition_ids = record_set_to_topic(&record_sets);
 
             let topics = _req.topics
                 .iter()
@@ -156,28 +159,43 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
         }
         RequestKind::Fetch(_req) => {
             let record_sets = parse_cluster_metadata().await;
-            let topic_to_partition_ids = record_set_to_topic(record_sets);
+            let topic_to_partition_ids = record_set_to_topic(&record_sets);
+            let topic_id_to_partition_ids: HashMap<Uuid, (&String, Vec<i32>)> = topic_to_partition_ids.iter().map(|kv| (kv.1.0, (kv.0, kv.1.1.clone()))).collect();
+            
             println!("{:?}", topic_to_partition_ids);
-
+            // let mut metadata_buf = read_metadata().await;
+            // println!("metadata:{:02x?}", metadata_buf);
+            // let topic_to_record_batch = parse_metadata_to_record_batch(&mut metadata_buf);
+            // println!("{:02x?}", topic_to_record_batch);
             let resp = if _req.topics.is_empty() {
                 FetchResponse::default()
             } else {
-                let topic = &_req.topics[0];
-                let topic_id = topic.topic_id;
-                let mut error_code = ResponseError::UnknownTopicId.code();
-                println!("{:?}", topic.topic);
-                if topic_to_partition_ids.values().any(|tuple| tuple.0.eq(&topic_id)) {
-                    error_code = 0;
-                };
-
-                let partition = PartitionData::default()
-                    .with_partition_index(0)
-                    .with_error_code(error_code);
-                let resp = FetchableTopicResponse::default()
-                    .with_topic_id(topic_id)
-                    .with_partitions(vec![partition]);
+                println!("fetch:{:?}", _req);
+                let mut resps = Vec::new();
+                for fetch_topic in _req.topics {
+                    let topic_id = fetch_topic.topic_id;
+                    let paritions_data = if topic_id_to_partition_ids.contains_key(&topic_id) {
+                        let topic_name = topic_id_to_partition_ids[&topic_id].0;
+                        let partition_data_future = fetch_topic.partitions.iter().map(async |fp| {
+                            let topic_data = read_topic_data(topic_name, fp.partition).await;
+                            let topic_data= topic_data.freeze();
+                            let partition_data = PartitionData::default()
+                                .with_partition_index(fp.partition)
+                                .with_records(Some(topic_data));
+                            partition_data
+                        });
+                        join_all(partition_data_future).await
+                    } else {
+                        vec![PartitionData::default()
+                            .with_error_code(ResponseError::UnknownTopicId.code())]
+                    };
+                    let resp = FetchableTopicResponse::default()
+                        .with_topic_id(topic_id)
+                        .with_partitions(paritions_data);
+                    resps.push(resp);
+                }
                 FetchResponse::default()
-                    .with_responses(vec![resp])
+                    .with_responses(resps)
             };
 
             (ResponseKind::Fetch(resp), FetchResponse::header_version(api_version))
@@ -187,10 +205,26 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
     build_response(default_response_header(request_header.correlation_id), header_version, response, api_version)
 }
 
-async fn parse_cluster_metadata() -> Vec<RecordSet> {
+async fn read_metadata() -> BytesMut {
     let filename = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
+    read_file(filename).await
+}
+
+async fn read_topic_data(topic_name: &str, partition_idx: i32) -> BytesMut {
+    let filename = format!("/tmp/kraft-combined-logs/{}-{}/00000000000000000000.log", topic_name, partition_idx);
+    read_file(filename.as_str()).await
+}
+
+async fn read_file(filename: &str) -> BytesMut {
+    println!("to read from: {}", filename);
     let bytes = fs::read(filename).await.unwrap();
+    println!("{:02x?}", bytes);
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&bytes);
+    buf
+}
+
+async fn parse_cluster_metadata() -> Vec<RecordSet> {
+    let mut buf = read_metadata().await;
     RecordBatchDecoder::decode_all(&mut buf).unwrap()
 }
