@@ -27,21 +27,25 @@ async fn main() {
     loop {
         match listener.accept().await {
             Ok((mut socket, _addr)) => {
-                // println!("Accepted new connection");
+                println!("Accepted new connection");
                 tokio::spawn(async move {
+                    let (mut rd, mut wr) = socket.split(); // Split for concurrent I/O
                     let mut buffer = [0; 1024];
-                    match socket.read(&mut buffer).await {
-                        Ok(n) if n > 0 => {
-                            let mut buf = BytesMut::from(&buffer[4..n]);
-                            let response = handle(&mut buf).await;
-                            let response_bytes: BytesMut = response.into();
-                            if let Err(e) = socket.write_all(&response_bytes).await {
-                                println!("Failed to write to socket: {}", e);
+                    loop {
+                        match rd.read(&mut buffer).await {
+                            Ok(n) if n > 0 => {
+                                let mut buf = BytesMut::from(&buffer[4..n]);
+                                let response = handle(&mut buf).await;
+                                let response_bytes: BytesMut = response.into();
+                                if let Err(e) = wr.write_all(&response_bytes).await {
+                                    println!("Failed to write to socket: {}", e);
+                                }
                             }
+                            Ok(_) => println!("Connection closed by client"),
+                            Err(e) => println!("Failed to read from socket: {}", e),
                         }
-                        Ok(_) => println!("Connection closed by client"),
-                        Err(e) => println!("Failed to read from socket: {}", e),
                     }
+                    let _ = socket.shutdown().await;
                 });
             }
             Err(e) => {
@@ -162,15 +166,9 @@ async fn handle(buf: &mut BytesMut) -> BytesMut {
             let topic_to_partition_ids = record_set_to_topic(&record_sets);
             let topic_id_to_partition_ids: HashMap<Uuid, (&String, Vec<i32>)> = topic_to_partition_ids.iter().map(|kv| (kv.1.0, (kv.0, kv.1.1.clone()))).collect();
             
-            println!("{:?}", topic_to_partition_ids);
-            // let mut metadata_buf = read_metadata().await;
-            // println!("metadata:{:02x?}", metadata_buf);
-            // let topic_to_record_batch = parse_metadata_to_record_batch(&mut metadata_buf);
-            // println!("{:02x?}", topic_to_record_batch);
             let resp = if _req.topics.is_empty() {
                 FetchResponse::default()
             } else {
-                println!("fetch:{:?}", _req);
                 let mut resps = Vec::new();
                 for fetch_topic in _req.topics {
                     let topic_id = fetch_topic.topic_id;
@@ -216,7 +214,6 @@ async fn read_topic_data(topic_name: &str, partition_idx: i32) -> BytesMut {
 }
 
 async fn read_file(filename: &str) -> BytesMut {
-    println!("to read from: {}", filename);
     let bytes = fs::read(filename).await.unwrap();
     println!("{:02x?}", bytes);
     let mut buf = BytesMut::new();

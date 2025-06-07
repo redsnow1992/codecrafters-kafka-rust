@@ -207,9 +207,7 @@ mod tests {
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&bytes);
         if let Ok(record_batch) = RecordBatchDecoder::decode_all(&mut buf) {
-            assert_eq!(2, record_batch.len());
-            let rb1 = &record_batch[0];
-            
+            assert_eq!(2, record_batch.len());            
             let rb2 = &record_batch[1];
             let record = &rb2.records[0];
             let mut record_value = record.value.clone();
